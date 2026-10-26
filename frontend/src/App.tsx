@@ -6,6 +6,7 @@ import {
   RotateCcw, Sparkles, Subtitles, Trash2, Undo2, WandSparkles, X,
 } from "lucide-react";
 import type { CaptionLayer, CaptionMode, CaptionSegment, EasingType, Keyframe, Project, StyleSettings } from "./domain";
+import { api, apiUrl } from "./api";
 import { getLanguageName, supportedLanguages, translationStorageKey } from "../../shared/languages";
 import { getVideoContentRect, interpolateTransform, type VideoContentRect } from "./utils/motion";
 import { HistoryManager } from "./utils/history";
@@ -181,39 +182,6 @@ const defaultStyle: StyleSettings = {
   safeAreaGuides: false, alignmentGuides: true, centerSnapping: true,
   topBannerText: "www.360vertexsolutions.com",
   bottomBannerText: "Contact for website's: 9959732476",
-};
-
-const api = async <T,>(url: string, init?: RequestInit): Promise<T> => {
-  let response: Response;
-  try {
-    response = await fetch(url, init);
-  } catch {
-    throw new Error("Could not connect to the caption API. Make sure the backend is running and CAPTION_API_TARGET points to it.");
-  }
-  if (!response.ok) {
-    const contentType = response.headers.get("content-type") ?? "";
-    if (response.status >= 500 && !contentType.includes("application/json")) {
-      throw new Error("Could not reach the caption backend. Start it with npm run dev and check CAPTION_API_TARGET.");
-    }
-    const result = contentType.includes("application/json")
-      ? await response.json().catch(() => ({ error: response.statusText })) as { error?: string }
-      : { error: response.statusText };
-    const fallbackMessages: Record<number, string> = {
-      400: "The request is invalid. Check the selected language and caption settings.",
-      404: "The project or media file could not be found. Reload the project and try again.",
-      429: "The service is busy or the Gemini quota was reached. Wait before trying again.",
-      413: "The video is larger than the configured upload limit.",
-      415: "Choose an MP4, MOV, or WebM video file.",
-      500: "The backend encountered an unexpected error. Check the backend terminal for details.",
-      502: "Gemini could not complete this translation. Try again later.",
-      503: "The backend or a required service is unavailable. Check the service configuration and logs.",
-      504: "Gemini took too long to respond. Please try again later.",
-    };
-    throw new Error(result.error && result.error !== response.statusText
-      ? result.error
-      : fallbackMessages[response.status] ?? `Request failed (${response.status}).`);
-  }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 };
 
 function App() {
@@ -624,12 +592,12 @@ function App() {
     try {
       const uploaded = await new Promise<StudioProject>((resolve, reject) => {
         const request = new XMLHttpRequest();
-        request.open("POST", "/api/projects");
+        request.open("POST", apiUrl("/api/projects"));
         request.timeout = 10 * 60 * 1000;
         request.upload.onprogress = (event) => {
           if (event.lengthComputable) setWorking(`Uploading video · ${Math.round(event.loaded / event.total * 100)}%`);
         };
-        request.onerror = () => reject(new Error("The upload could not reach the caption API. Make sure the backend is running and the Vite proxy is configured."));
+        request.onerror = () => reject(new Error("The upload could not reach the caption API. Check VITE_API_BASE_URL, backend availability, and CORS configuration."));
         request.ontimeout = () => reject(new Error("The video upload timed out. Check your connection and try again."));
         request.onabort = () => reject(new Error("The video upload was cancelled."));
         request.onload = () => {
@@ -645,7 +613,7 @@ function App() {
           }
           if (request.status < 200 || request.status >= 300) {
             const message = request.status >= 500 && !contentType.includes("application/json")
-              ? "Could not reach the caption backend. Start it with npm run dev and check CAPTION_API_TARGET."
+              ? "Could not reach the caption backend. Check VITE_API_BASE_URL and the backend deployment logs."
               : typeof result === "object" && result !== null && "error" in result && typeof result.error === "string"
               ? result.error
               : request.status === 413
@@ -1202,7 +1170,7 @@ function App() {
       }
       if (!url) throw new Error("The export did not return a download link.");
       const link = document.createElement("a");
-      link.href = url;
+      link.href = apiUrl(url);
       link.download = `${project.name}-captions.${format}`;
       document.body.append(link);
       link.click();
@@ -1739,7 +1707,7 @@ function App() {
             >
               <video
                 ref={videoRef}
-                src={project.videoUrl}
+                src={apiUrl(project.videoUrl)}
                 onLoadedMetadata={(event) => {
                   setDuration(event.currentTarget.duration || project.duration);
                 }}

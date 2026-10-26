@@ -37,8 +37,7 @@ const gemini = process.env.GEMINI_API_KEY
   : undefined;
 
 function isAllowedOrigin(origin: string): boolean {
-  if (origin === (process.env.PUBLIC_APP_ORIGIN ?? "http://localhost:5173")) return true;
-  if (process.env.NODE_ENV === "production") return false;
+  if (origin === "https://caption-ai-studio.netlify.app" || origin === process.env.PUBLIC_APP_ORIGIN) return true;
   try {
     const url = new URL(origin);
     return ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
