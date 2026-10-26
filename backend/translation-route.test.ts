@@ -76,6 +76,31 @@ after(async () => {
   if (storageDir) await rm(storageDir, { recursive: true, force: true });
 });
 
+test("serves health without Gemini credentials", async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/health`);
+  assert.equal(response.status, 200);
+  const health = await response.json() as { ok: boolean; server: string; gemini: boolean };
+  assert.equal(health.ok, true);
+  assert.equal(health.server, "running");
+  assert.equal(health.gemini, false);
+});
+
+test("allows the production frontend CORS preflight", async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://caption-ai-studio.netlify.app",
+      "Access-Control-Request-Method": "GET",
+    },
+  });
+  assert.equal(response.status, 204);
+  assert.equal(
+    response.headers.get("access-control-allow-origin"),
+    "https://caption-ai-studio.netlify.app",
+  );
+  assert.match(response.headers.get("access-control-allow-methods") ?? "", /\bGET\b/);
+});
+
 test("rejects an invalid translation payload with HTTP 400", async () => {
   const response = await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/translate`, {
     method: "POST",

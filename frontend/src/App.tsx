@@ -1583,8 +1583,8 @@ function App() {
         <section className={`welcome ${dragging ? "drop-active" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={handleDrop}>
           <div className="welcome-copy"><div className="eyebrow"><Sparkles size={13} /> YOUR STORY, IN EVERY WORD</div><h1>Good videos deserve<br /><em>great captions.</em></h1><p>Make every word count. Turn your video into a story people can watch anywhere.</p>
             {geminiAvailable === false && <button className="speech-setup-notice" onClick={() => setShowGeminiSetup(true)}><AudioLines size={15} /><span><b>Gemini needs configuration</b><small>Set the API key on the backend to generate captions</small></span><ChevronDown size={14} /></button>}
-            {geminiAvailable === null && !serviceError && <span className="speech-setup-notice"><LoaderCircle size={15} /><span><b>Connecting to the local caption service…</b><small>Make sure both frontend and backend are running</small></span></span>}
-            {geminiAvailable === null && serviceError && <span className="speech-setup-notice"><X size={15} /><span><b>Caption service unavailable</b><small>{serviceError} Start both servers with <code>npm run dev</code>.</small></span></span>}
+            {geminiAvailable === null && !serviceError && <span className="speech-setup-notice"><LoaderCircle size={15} /><span><b>Connecting to the caption service…</b><small>The service may take a moment to wake up</small></span></span>}
+            {geminiAvailable === null && serviceError && <span className="speech-setup-notice"><X size={15} /><span><b>Caption service unavailable</b><small>{serviceError} Check the backend deployment and VITE_API_BASE_URL.</small></span></span>}
             {geminiAvailable === true && <span className="speech-ready"><Check size={13} /> Gemini ready · auto-detect English / Telugu</span>}
           </div>
           <div className="upload-card">

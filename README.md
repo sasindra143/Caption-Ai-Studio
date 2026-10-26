@@ -13,6 +13,8 @@ The project is split into `frontend/` (the Vite editor) and `backend/` (the Expr
 
 The API listens on port `5000` by default. For separate terminals, run `npm run dev:server` and `npm run dev:client` from the root. The Vite proxy uses the backend `PORT` from the root `.env`; set `CAPTION_API_TARGET` to override it with a full backend URL. If the frontend shows a connection error, make sure the API is running and that the proxy target matches its address. Never put `GEMINI_API_KEY` in a `VITE_` variable or browser code.
 
+The Netlify build sets `VITE_API_BASE_URL` to the Render API origin so production API calls, media, and export downloads go to the backend. If the backend URL changes, update `netlify.toml` and redeploy the Netlify site.
+
 For compatibility when you are already in the `backend/` directory, `node server.js` starts the same API. The backend reads the root `.env` first and falls back to `backend/.env` for local setup; the root file takes precedence if both define the same variable.
 
 Transcription and translation use the `@google/genai` SDK on the backend. The default transcription model is `gemini-3.5-transcribe`; the default text transformation model is `gemini-3.5-flash-lite`. Model availability, free-tier eligibility, limits, and pricing depend on the Google account and can change. Review the [transcription guide](https://ai.google.dev/gemini-api/docs/transcribe), [model documentation](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-transcribe), and [pricing and rate limits](https://ai.google.dev/gemini-api/docs/pricing). Set `GEMINI_TRANSCRIPTION_MODEL` or `GEMINI_TEXT_MODEL` in `.env` to use other currently available models.
