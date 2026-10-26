@@ -9,7 +9,8 @@
     "dev:server": "tsx watch backend/index.ts",
     "build": "tsc --noEmit && vite build --config frontend/vite.config.ts",
     "start": "tsx backend/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:backend": "node --import tsx --test backend/gemini-errors.test.ts backend/translation-route.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.31.0",

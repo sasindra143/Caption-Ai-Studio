@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { geminiClientMessage, geminiHttpStatus, geminiSafeDiagnostic } from "./gemini-errors";
 import type { CaptionSegment, Project } from "../frontend/src/domain";
 import { getLanguageName, supportedLanguages, translationStorageKey } from "../shared/languages";
 
@@ -33,7 +34,13 @@ const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env
 const transcriptionModel = process.env.GEMINI_TRANSCRIPTION_MODEL ?? "gemini-3.5-transcribe";
 const translationModel = process.env.GEMINI_TEXT_MODEL ?? "gemini-3.5-flash-lite";
 const gemini = process.env.GEMINI_API_KEY
-  ? new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY, httpOptions: { retryOptions: { attempts: 1 } } })
+  ? new GoogleGenAI({
+    apiKey: process.env.GEMINI_API_KEY,
+    httpOptions: {
+      timeout: 60_000,
+      retryOptions: { attempts: 2, initialDelay: 0.5, maxDelay: 2, httpStatusCodes: [408, 500, 502, 503, 504] },
+    },
+  })
   : undefined;
 
 function isAllowedOrigin(origin: string): boolean {
@@ -269,45 +276,14 @@ function readWordAnnotations(interaction: GoogleGenAIInteraction): Array<{ word:
   ).sort((left, right) => left.start - right.start);
 }
 
-function geminiStatus(error: unknown): number | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
-  const status = "status" in error ? Number((error as { status?: unknown }).status) : undefined;
-  const code = typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code?: unknown }).code).toUpperCase() : "";
-  const message = error instanceof Error ? error.message : "";
-  if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(`${code} ${message}`)) return 429;
-  if (status === 401 || status === 403 || /API key not valid|unauthorized|permission denied/i.test(message)) return 502;
-  if (status === 404 || /model .*not found|not supported for.*generate/i.test(message)) return 503;
-  if (status === 408 || status === 504 || /timeout|timed out|ETIMEDOUT/i.test(message)) return 504;
-  if (status !== undefined && status >= 500) return 502;
-  if (status !== undefined && status >= 400) return 502;
-  return undefined;
-}
-
-function geminiErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const status = geminiStatus(error);
-  const code = typeof error === "object" && error !== null && "code" in error
-    ? String((error as { code?: unknown }).code).toUpperCase() : "";
-  if (status === 429 || /RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(`${code} ${message}`)) {
-    return "Gemini API quota or rate limit reached. Review your Google AI Studio plan and limits, then try again later. This request was not retried.";
-  }
-  if (status === 401 || status === 403 || /API key not valid|unauthorized|permission denied/i.test(message)) {
-    return "Gemini rejected the API key. Check GEMINI_API_KEY in the root .env file and restart the backend.";
-  }
-  if (status === 404 || /model .*not found|not supported for.*generate/i.test(message)) {
-    return "The configured Gemini model is unavailable. Check model access and the backend model configuration.";
-  }
-  if (status === 504 || /timeout|timed out|ETIMEDOUT/i.test(message)) {
-    return "Gemini did not respond before the request timed out. Please try again later.";
-  }
-  return "Gemini could not complete this request. Check the backend logs and Gemini API status.";
-}
-
 const transcriptionLanguageCodes = new Set(supportedLanguages.map((language) => language.code));
 
 class InvalidTranslationResponseError extends Error {}
-class GeminiUpstreamError extends Error {}
+class GeminiUpstreamError extends Error {
+  constructor(message: string, readonly status?: number) {
+    super(message);
+  }
+}
 
 async function translateCaptionBatch(
   captions: CaptionSegment[],
@@ -345,11 +321,9 @@ async function translateCaptionBatch(
       },
     });
   } catch (error) {
-    const status = error instanceof ApiError ? error.status : undefined;
-    const detail = error instanceof Error ? error.message.replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]") : String(error);
-    console.error(`[gemini:translation] upstream ${status ?? "network"}: ${detail}`);
+    console.error(`[gemini:translation] ${geminiSafeDiagnostic(error)}`);
     if (error instanceof ApiError) throw error;
-    throw new GeminiUpstreamError("Gemini translation service is unavailable.");
+    throw new GeminiUpstreamError("Gemini translation service is unavailable.", geminiHttpStatus(error));
   }
   const content = response.text;
   if (!content) throw new InvalidTranslationResponseError("Gemini returned an empty translation response.");
@@ -465,8 +439,9 @@ async function transcribe(project: Project, jobId: string, language: string): Pr
     job.progress = 100;
     job.message = "Voice-synced captions are ready";
   } catch (error) {
-    const message = error instanceof ApiError ? geminiErrorMessage(error)
+    const message = error instanceof ApiError ? geminiClientMessage(error)
       : error instanceof Error ? error.message : "An unexpected transcription error occurred.";
+    if (error instanceof ApiError) console.error(`[gemini:transcription] ${geminiSafeDiagnostic(error)}`);
     project.status = "error";
     project.error = message;
     await saveProject(project);
@@ -996,8 +971,8 @@ app.post("/api/projects/:id/correct-spelling", async (req, res, next) => {
       return res.status(502).json({ error: `${error.message} No captions were changed.` });
     }
     if (error instanceof ApiError) {
-      const message = geminiErrorMessage(error);
-      return res.status(error.status === 429 ? 429 : error.status === 401 || error.status === 403 ? 503 : error.status === 504 ? 504 : 502).json({ error: message });
+      console.error(`[gemini:spelling-correction] ${geminiSafeDiagnostic(error)}`);
+      return res.status(geminiHttpStatus(error) ?? 502).json({ error: geminiClientMessage(error) });
     }
     return next(error);
   } finally {
@@ -1133,12 +1108,14 @@ app.post("/api/projects/:id/translate", async (req, res, _next) => {
     if (error instanceof InvalidTranslationResponseError) {
       return res.status(502).json({ error: `${error.message} No translated captions were saved.` });
     }
-    console.error(`[translation] ${req.method} ${req.originalUrl}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-    if (error instanceof ApiError) {
-      const message = geminiErrorMessage(error);
-      return res.status(error.status === 429 ? 429 : error.status === 401 || error.status === 403 ? 503 : 502).json({ error: message });
+    if (error instanceof ApiError || error instanceof GeminiUpstreamError ||
+      error instanceof Error && /timeout|timed out|ETIMEDOUT/i.test(error.message)) {
+      const status = geminiHttpStatus(error) ?? 502;
+      console.error(`[translation] upstream ${geminiSafeDiagnostic(error)}`);
+      return res.status(status).json({ error: geminiClientMessage(error) });
     }
-    return res.status(502).json({ error: "Caption conversion failed before anything was saved. Check the backend log for the model or storage error." });
+    console.error(`[translation] ${error instanceof Error ? error.name : "UnknownError"}: request failed before captions were saved.`);
+    return res.status(500).json({ error: "Caption conversion failed before anything was saved. Check the backend deployment logs." });
   }
 });
 
@@ -1767,18 +1744,18 @@ app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
   const status = isTooLarge ? 413
     : error instanceof UnsupportedVideoError ? error.status
       : error instanceof InvalidVideoError ? error.status
-    : isGeminiError ? geminiStatus(error) ?? 502
+    : isGeminiError ? geminiHttpStatus(error) ?? 502
       : isInvalidJson || errStatus === 400 ? 400
         : errStatus === 404 ? 404
           : 500;
-  const safeMessage = isGeminiError ? geminiErrorMessage(error)
+  const safeMessage = isGeminiError ? geminiClientMessage(error)
     : isTooLarge ? `Video exceeds the ${process.env.MAX_UPLOAD_MB ?? 300} MB upload limit.`
       : error instanceof UnsupportedVideoError || error instanceof InvalidVideoError ? error.message
       : isInvalidJson ? "Request body must contain valid JSON."
         : status === 404 ? "Requested file or resource was not found."
           : status === 400 ? "Request is invalid."
             : "Unexpected server error. Check the backend terminal for details.";
-  const diagnostic = error instanceof Error ? error.stack ?? error.message : String(error);
+  const diagnostic = isGeminiError ? geminiSafeDiagnostic(error) : error instanceof Error ? error.name : "UnknownError";
   console.error(`[api] ${req.method} ${req.originalUrl} -> ${status}: ${diagnostic}`);
   if (!res.headersSent) res.status(status).json({ error: safeMessage });
 });
