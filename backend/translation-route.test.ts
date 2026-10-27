@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import ffmpegPath from "ffmpeg-static";
+import ffprobe from "ffprobe-static";
 import test, { after, before } from "node:test";
 
+const execFileAsync = promisify(execFile);
 const backendDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(backendDir, "..");
 const projectId = "11111111-1111-4111-8111-111111111111";
@@ -21,11 +25,19 @@ before(async () => {
   await mkdir(path.join(storageDir, "projects"), { recursive: true });
   await mkdir(path.join(storageDir, "uploads"), { recursive: true });
   await mkdir(path.join(storageDir, "exports"), { recursive: true });
+  if (!ffmpegPath) throw new Error("FFmpeg is required for the export test.");
+  const mediaPath = path.join(storageDir, "uploads", "test.mp4");
+  await execFileAsync(ffmpegPath, [
+    "-y", "-f", "lavfi", "-i", "testsrc=size=1920x1080:rate=15",
+    "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=44100",
+    "-t", "2", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+    "-c:a", "aac", mediaPath,
+  ], { timeout: 30_000 });
   await writeFile(path.join(storageDir, "projects", `${projectId}.json`), JSON.stringify({
     id: projectId,
     name: "Translation test",
     originalName: "test.mp4",
-    mediaPath: path.join(storageDir, "uploads", "test.mp4"),
+    mediaPath,
     duration: 2,
     createdAt: new Date(0).toISOString(),
     sourceLanguage: "en-US",
@@ -85,20 +97,71 @@ test("serves health without Gemini credentials", async () => {
   assert.equal(health.gemini, false);
 });
 
-test("allows the production frontend CORS preflight", async () => {
+test("allows only configured origins and handles CORS preflight", async () => {
+  const allowedOrigins = [
+    "https://caption-ai-studio-frontend.vercel.app",
+    "https://caption-ai-studio.netlify.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+  ];
+
+  for (const origin of allowedOrigins) {
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      method: "OPTIONS",
+      headers: {
+        Origin: origin,
+        "Access-Control-Request-Method": "GET",
+      },
+    });
+    assert.equal(response.status, 204, `Expected OPTIONS success for ${origin}`);
+    assert.equal(response.headers.get("access-control-allow-origin"), origin);
+    assert.match(response.headers.get("access-control-allow-methods") ?? "", /\bGET\b/);
+  }
+
+  const unknownOrigin = "https://untrusted.example";
   const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
     method: "OPTIONS",
     headers: {
-      Origin: "https://caption-ai-studio.netlify.app",
+      Origin: unknownOrigin,
       "Access-Control-Request-Method": "GET",
     },
   });
-  assert.equal(response.status, 204);
-  assert.equal(
-    response.headers.get("access-control-allow-origin"),
-    "https://caption-ai-studio.netlify.app",
-  );
-  assert.match(response.headers.get("access-control-allow-methods") ?? "", /\bGET\b/);
+  assert.notEqual(response.headers.get("access-control-allow-origin"), unknownOrigin);
+});
+
+test("renders 720p MP4 exports at mobile-friendly original aspect ratio", async () => {
+  const response = await fetch(`http://127.0.0.1:${port}/api/projects/${projectId}/export`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ format: "mp4", mode: "original", aspectRatio: "original", resolution: "720p", style: {} }),
+  });
+  assert.equal(response.status, 202);
+  const { jobId } = await response.json() as { jobId: string };
+  const deadline = Date.now() + 30_000;
+  let resultUrl: string | undefined;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const progressResponse = await fetch(`http://127.0.0.1:${port}/api/jobs/${jobId}`);
+    const progress = await progressResponse.json() as { status: string; error?: string; resultUrl?: string };
+    if (progress.status === "failed") throw new Error(progress.error ?? "MP4 export failed.");
+    if (progress.status === "completed") {
+      resultUrl = progress.resultUrl;
+      break;
+    }
+  }
+  assert.ok(resultUrl, "MP4 export should finish within 30 seconds.");
+  const download = await fetch(`http://127.0.0.1:${port}${resultUrl}`);
+  assert.equal(download.status, 200);
+  assert.match(download.headers.get("content-type") ?? "", /video\/mp4/);
+  const filename = resultUrl.split("/").at(-1);
+  assert.ok(filename);
+  assert.ok(ffprobe.path, "FFprobe is required to inspect the export dimensions.");
+  const { stdout } = await execFileAsync(ffprobe.path, [
+    "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json",
+    path.join(storageDir, "exports", filename),
+  ]);
+  const stream = (JSON.parse(stdout) as { streams: Array<{ width: number; height: number }> }).streams[0];
+  assert.deepEqual({ width: stream.width, height: stream.height }, { width: 1280, height: 720 });
 });
 
 test("rejects an invalid translation payload with HTTP 400", async () => {

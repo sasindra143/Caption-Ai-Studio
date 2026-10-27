@@ -44,14 +44,12 @@ const gemini = process.env.GEMINI_API_KEY
   : undefined;
 
 function isAllowedOrigin(origin: string): boolean {
-  if (origin === "https://caption-ai-studio.netlify.app" || origin === process.env.PUBLIC_APP_ORIGIN) return true;
-  try {
-    const url = new URL(origin);
-    return ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
-      Number(url.port || 80) >= 5173 && Number(url.port || 80) <= 5185;
-  } catch {
-    return false;
-  }
+  return [
+    "https://caption-ai-studio-frontend.vercel.app",
+    "https://caption-ai-studio.netlify.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+  ].includes(origin);
 }
 
 function assOverrideColor(hex: string): string {
@@ -1646,32 +1644,55 @@ app.post("/api/projects/:id/export", async (req, res, next) => {
     } catch (probeErr) {
       console.warn("[export] Could not probe video dimensions:", probeErr);
     }
-    const subtitlePath = path.join(exportDir, `${project.id}-${Date.now()}.ass`);
-    await writeFile(subtitlePath, buildAssSubtitles(finalSegments, style, segments === project.segments, resolution, aspectRatio, origWidth, origHeight), "utf8");
     const size = resolution === "720p" ? 720 : 1080;
-    const dimensions = aspectRatio === "9:16" ? `${Math.round(size * 9 / 16)}:${size}` : aspectRatio === "1:1" ? `${size}:${size}` : aspectRatio === "16:9" ? `${Math.round(size * 16 / 9)}:${size}` : "0:0";
+    const portrait = aspectRatio === "9:16" || aspectRatio === "original" &&
+      (origHeight ?? 0) > (origWidth ?? 0);
+    const dimensions = aspectRatio === "9:16" ? `${Math.round(size * 9 / 16)}:${size}`
+      : aspectRatio === "1:1" ? `${size}:${size}`
+        : aspectRatio === "16:9" ? `${Math.round(size * 16 / 9)}:${size}`
+          : portrait ? `${size}:${Math.round(size * 16 / 9)}` : `${Math.round(size * 16 / 9)}:${size}`;
+    let [frameWidth, frameHeight] = dimensions.split(":").map(Number);
+    if (aspectRatio === "original" && origWidth && origHeight) {
+      const downscale = Math.min(1, frameWidth / origWidth, frameHeight / origHeight);
+      frameWidth = Math.max(2, Math.floor(origWidth * downscale / 2) * 2);
+      frameHeight = Math.max(2, Math.floor(origHeight * downscale / 2) * 2);
+    }
+    const outputDimensions = `${frameWidth}:${frameHeight}`;
+    const subtitlePath = path.join(exportDir, `${project.id}-${Date.now()}.ass`);
+    await writeFile(subtitlePath, buildAssSubtitles(
+      finalSegments,
+      style,
+      segments === project.segments,
+      resolution,
+      aspectRatio,
+      frameWidth,
+      frameHeight,
+    ), "utf8");
     const escapedSubs = escapeFilterPath(subtitlePath);
     const subtitleFilter = `subtitles=filename='${escapedSubs}'`;
     const scaledFilter = aspectRatio === "original" ? subtitleFilter
       : `scale=${dimensions}:force_original_aspect_ratio=decrease,pad=${dimensions}:(ow-iw)/2:(oh-ih)/2,${subtitleFilter}`;
+    const outputFilter = aspectRatio === "original"
+      ? `scale=${outputDimensions}:force_original_aspect_ratio=decrease,${subtitleFilter}`
+      : scaledFilter;
     const filterComplex = cuts.length ? [
       ...keptIntervals.map((interval, index) =>
         `[0:v]trim=start=${interval.start}:end=${interval.end},setpts=PTS-STARTPTS[v${index}];` +
         `[0:a]atrim=start=${interval.start}:end=${interval.end},asetpts=PTS-STARTPTS[a${index}]`,
       ),
       `${keptIntervals.map((_interval, index) => `[v${index}][a${index}]`).join("")}concat=n=${keptIntervals.length}:v=1:a=1[vc][ac]`,
-      `[vc]${scaledFilter}[vout]`,
+      `[vc]${outputFilter}[vout]`,
     ].join(";") : "";
     const args = cuts.length
       ? [
           "-y", "-i", project.mediaPath, "-filter_complex",
           filterComplex,
-          "-map", "[vout]", "-map", "[ac]", "-progress", "pipe:1", "-nostats", "-c:v", "libx264", "-preset", "veryfast",
+          "-map", "[vout]", "-map", "[ac]", "-progress", "pipe:1", "-nostats", "-c:v", "libx264", "-preset", resolution === "720p" ? "ultrafast" : "veryfast",
           "-crf", "20", "-c:a", "aac", "-movflags", "+faststart", outputPath,
         ]
       : [
-          "-y", "-i", project.mediaPath, "-vf", scaledFilter, "-progress", "pipe:1", "-nostats",
-          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-movflags", "+faststart", outputPath,
+          "-y", "-i", project.mediaPath, "-vf", outputFilter, "-progress", "pipe:1", "-nostats",
+          "-c:v", "libx264", "-preset", resolution === "720p" ? "ultrafast" : "veryfast", "-crf", "20", "-c:a", "aac", "-movflags", "+faststart", outputPath,
         ];
     const jobId = randomUUID();
     jobs.set(jobId, { status: "processing", progress: 1, message: "Preparing video render" });
